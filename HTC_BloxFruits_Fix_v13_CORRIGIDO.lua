@@ -336,8 +336,13 @@ local function isMob(m)
 end
 
 local function alive(m)
-  local h = m and m.Parent and m:FindFirstChildOfClass("Humanoid")
-  return h and h.Health > 0
+  -- Não mantém alvo que saiu do Workspace ou perdeu a peça raiz durante o streaming.
+  if not m or not m:IsA("Model") then return false end
+  local ok, inWorld = pcall(function() return m:IsDescendantOf(WS) end)
+  if not ok or not inWorld then return false end
+  local h = m:FindFirstChildOfClass("Humanoid")
+  local root = m:FindFirstChild("HumanoidRootPart")
+  return h ~= nil and h.Parent == m and root ~= nil and root:IsA("BasePart") and h.Health > 0
 end
 
 local function lvOf(m)
@@ -359,22 +364,36 @@ local function underNpc(m) -- modelo dentro de pasta "NPCs" ou com nome de quest
 end
 
 local function mobFolder()
-  if S.folder and S.folder.Parent then return S.folder end
-  if tick() - S.folderT < 15 then return WS end
+  -- A pasta oficial tem prioridade em toda chamada: ela pode ser substituída
+  -- durante troca de ilha/streaming mesmo que a referência antiga ainda exista.
+  local official = WS:FindFirstChild("Enemies")
+  if official then
+    S.folder, S.folderT = official, tick()
+    return official
+  end
+
+  -- A pasta alternativa é apenas um fallback temporário; não a conserva por
+  -- 15 segundos, pois os NPCs/pastas podem mudar ao carregar outra região.
+  if tick() - S.folderT < 1 then
+    if S.folder and S.folder ~= WS and S.folder.Parent and S.folder:IsDescendantOf(WS)
+      and S.folder.Name ~= "Enemies" then
+      return S.folder
+    end
+    return nil
+  end
   S.folderT = tick()
-  local f = WS:FindFirstChild("Enemies")
-  if not f then
-    local counts, bestN = {}, 0
-    for h in pairs(S.hum) do
-      local m = h.Parent
-      if m and m.Parent and m.Parent ~= WS and isMob(m) and not interactive(m) and not underNpc(m) then
-        counts[m.Parent] = (counts[m.Parent] or 0) + 1
-        if counts[m.Parent] > bestN then bestN, f = counts[m.Parent], m.Parent end
-      end
+  local counts, bestN, f = {}, 0, nil
+  for h in pairs(S.hum) do
+    local m = h.Parent
+    if m and m.Parent and m.Parent ~= WS and isMob(m) and not interactive(m) and not underNpc(m) then
+      local parent = m.Parent
+      counts[parent] = (counts[parent] or 0) + 1
+      if counts[parent] > bestN then bestN, f = counts[parent], parent end
     end
   end
+  if f and (not f:IsDescendantOf(WS) or f == WS) then f = nil end
   S.folder = f
-  return f or WS
+  return f
 end
 
 local function mobs()
@@ -384,9 +403,9 @@ local function mobs()
   -- Só confiamos nos filhos da pasta de inimigos quando ela existe.
   -- Se mobFolder() cair no Workspace, não tratamos seus modelos diretos
   -- como inimigos: NPCs de loja/missão também podem ter Humanoid.
-  if folder and folder ~= WS then
+  if folder and folder ~= WS and folder:IsDescendantOf(WS) then
     for _, m in ipairs(folder:GetChildren()) do
-      if isMob(m) then
+      if isMob(m) and alive(m) then
         out[#out + 1] = m
         seen[m] = true
       end
@@ -402,7 +421,7 @@ local function mobs()
 
     for h in pairs(S.hum) do
       local m = h.Parent
-      if m and m.Parent and not seen[m] and isMob(m)
+      if m and m.Parent and not seen[m] and isMob(m) and alive(m)
         and not interactive(m) and not underNpc(m)
         and questNames[cleanName(m.Name)] then
         out[#out + 1] = m
@@ -1492,6 +1511,8 @@ local function farmStep()
   if hum.Health < S.myHp - 1 then S.hAdj = math.min(S.hAdj + 3, 10) end -- tomou dano: sobe
   S.myHp = hum.Health
   if not alive(S.target) then
+    S.target = nil
+    S.group, S.gather = {}, nil
     S.target = pickTarget(r)
     if not S.target and (next(S.black) ~= nil or S.busy) then -- estado antigo: limpa e tenta de novo
       resetFarm()
